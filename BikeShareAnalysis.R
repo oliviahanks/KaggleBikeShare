@@ -25,12 +25,19 @@ my_recipe <- recipe(count ~ ., data=bike_train) %>% # Set model formula and data
   step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
   step_mutate(season=factor(season, levels=1:4, labels=c("spring","summer","fall", "winter"))) %>%
   step_mutate(weather=factor(weather, levels=1:3, labels=c("clear","misty","raining"))) %>%
+  # also changed binary to "Yes" and "No"
   step_dummy(all_nominal_predictors()) %>% #create dummy variables
   step_time(datetime, features=c("hour", "minute")) #create time variable
   
 prepped_recipe <- prep(my_recipe) 
 bake(prepped_recipe, new_data = bike_test)
 
+<<<<<<< HEAD
+=======
+# New Data
+#new_bike_test <- bake(prepped_recipe, new_data = bike_test)
+#new_bike_train <- bake(prepped_recipe, new_data = bike_train)
+>>>>>>> 0544ee5d2a016cb1d07b851d1eaf6219fb7b3f3c
 
 ### Linear Regression ###
 my_mod <- linear_reg() %>% #Type of model
@@ -43,7 +50,11 @@ bike_workflow <- workflow() %>%
 
 bike_predictions <- predict(bike_workflow,new_data=bike_test) # Use fit to predict
 
+<<<<<<< HEAD
 # for more info
+=======
+
+>>>>>>> 0544ee5d2a016cb1d07b851d1eaf6219fb7b3f3c
 #extract_fit_engine(bike_workflow) %>% tidy()
 #extract_fit_engine(bike_workflow) %>% summary()
 
@@ -59,7 +70,11 @@ SampleSubmission <- SampleSubmission[c('datetime', 'count')]
 #vroom_write(SampleSubmission, "./SampleSubmission.csv", delim = ',')
 
 
+<<<<<<< HEAD
 ### Poisson Regression ###
+=======
+## Poisson Regression
+>>>>>>> 0544ee5d2a016cb1d07b851d1eaf6219fb7b3f3c
 pois_mod <- poisson_reg() %>% #Type of model
 set_engine("glm") # GLM = generalized linear model
 
