@@ -9,6 +9,7 @@ library(tidyverse)
 library(tidymodels)
 library(vroom)
 library(poissonreg)
+library(stacks)
 
 ## Read in the Data
 bike_train <- vroom("./train.csv")
@@ -85,8 +86,6 @@ test_preds <- bike_predictions %>%
 
 
 ### Penalized Regression ###
-## Create a recipe
-## Feature Engineering
 
 ## Transform to log(count) - I can only do this on train set because
 ## test set does not have count.  Hence, I am doing this outside of recipe
@@ -94,16 +93,16 @@ test_preds <- bike_predictions %>%
 bike_train_log <- bike_train %>%
   mutate(count=log(count))
 
-my_recipe_pen <- recipe(count ~ ., data=bike_train_log) %>% # Set model formula and dataset
+# Create a Recipe/Feature Engineering
+my_recipe_pen <- recipe(count ~ ., data=bike_train_log) %>%
   step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
   step_mutate(season=factor(season, levels=1:4, labels=c("spring","summer","fall", "winter"))) %>%
   step_mutate(weather=factor(weather, levels=1:3, labels=c("clear","misty","raining"))) %>%
-  # also changed binary to "Yes" and "No"
   step_time(datetime, features=c("hour")) %>% #create time variable
   step_mutate(datetime_hour = factor(datetime_hour)) %>%
   step_rm(datetime) %>%
   step_dummy(all_nominal_predictors()) %>% #create dummy variables
-  step_normalize(all_numeric_predictors())
+  step_normalize(all_numeric_predictors()) # needed for penalized regression
 
 ## Penalized regression model
 preg_model <- linear_reg(penalty=.1, mixture=.1) %>% #Set model and tuning
@@ -121,12 +120,13 @@ test_preds <- predict(preg_wf, new_data=bike_test) %>%
   rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
   mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
 ## Write prediction file to CSV
 #vroom_write(x=test_preds, file="./PenalizedSubmission.csv", delim=",")
 
 
 
-### Tuning Parameters
+### Tuning Parameters ###
 ## Penalized regression model
 preg_model <- linear_reg(penalty=tune(),
 mixture=tune()) %>% #Set model and tuning
@@ -140,7 +140,7 @@ add_model(preg_model)
 ## Grid of values to tune over
 tuning_grid <- grid_regular(penalty(),
 mixture(),
-levels = 5) ## L^2 total tuning possibilities
+levels = 5) ## L^2 total tuning possibilities works in a lXl grid
 
 ## Split data for CV
 folds <- vfold_cv(bike_train_log, v = 5, repeats=1)
@@ -179,11 +179,12 @@ test_preds <- final_wf %>%
   rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
   mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
 ## Write prediction file to CSV
 #vroom_write(x=test_preds, file="./TunePenSubmission.csv", delim=",")
 
 
-## Growing Trees
+### Growing Trees ###
 my_mod <- decision_tree(tree_depth = tune(),
 cost_complexity = tune(),
 min_n=tune()) %>% #Type of model
@@ -239,21 +240,22 @@ test_preds <- final_wf %>%
   rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
   mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
 ## Write prediction file to CSV
 #vroom_write(x=test_preds, file="./TreeSubmission.csv", delim=",")
 
 
 
-### Random Forest
+### Random Forest ###
 
 RF_mod <- rand_forest(mtry = tune(),
 min_n=tune(),
-trees=500) %>% #Type of model (500 or 1000)
+trees=500) %>% #Type of model (500 or 1000) # more is better
 set_engine("ranger") %>% # What R function to use
 set_mode("regression")
 
 ## Create a workflow with model & recipe
-# use my_recipe_tree
+# use my_recipe_tree from tree model
 RF_wf <- workflow() %>%
 add_recipe(my_recipe_tree) %>%
 add_model(RF_mod)
@@ -293,7 +295,152 @@ test_preds <- final_wf %>%
   rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
   mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
 ## Write prediction file to CSV
 vroom_write(x=test_preds, file="./RFSubmission.csv", delim=",")
 
 
+
+### Model Stacking ###
+
+my_recipe_modstack <- recipe(count ~ ., data = bike_train_modstack) %>% 
+  
+  ## Feature Engineering Section
+  ## make weather a factor
+  step_mutate(weather=factor(weather)) %>%
+  ## change weather 4 into weather 3
+  step_mutate(weather = ifelse(weather == 4, 3, weather))%>%
+  ## create hour and minutes variable
+  step_time(datetime, features = c("hour")) %>%
+  ## get days of the week
+  step_date(datetime, features = "dow") %>%
+  ## make weekend variable for FRI, SAT, SUN
+  step_mutate(weekend = case_when(datetime_dow == "Fri" ~ 1,
+                                  datetime_dow == "Sat" ~ 1,
+                                  datetime_dow == "Sun" ~ 1,
+                                  TRUE ~ 0)) %>%
+  ## remove datetime
+  step_rm(datetime) %>%
+  ## make season a factor
+  step_mutate(season=factor(season)) %>%
+  ## make hours a factor
+  step_mutate(datetime_hour = factor(datetime_hour)) %>%
+  ## remove zero variance predictors
+  step_zv(all_predictors()) %>%
+  ## change character variables to dummy variables
+  step_dummy(all_nominal_predictors()) %>%
+  ## normalize numeric predictors
+  step_normalize(all_numeric_predictors()) %>%
+  
+  prep()
+
+## cross-validation folds
+folds <- vfold_cv(bike_train_modstack, v = 10)
+
+## control settings for stacking models
+untunedModel <- control_stack_grid()
+tunedModel <- control_stack_resamples()
+
+
+## Set up linear model
+
+lin_model_modstack <- linear_reg() %>%
+  set_engine("lm")
+
+## Set workflow
+linreg_wf_modstack <- workflow() %>%
+  add_recipe(my_recipe_modstack) %>%
+  add_model(lin_model_modstack)
+
+## fit linear to folds
+linreg_folds_fit <- linreg_wf_modstack %>%
+  fit_resamples(resamples = folds,
+                control = tunedModel)
+
+
+## Penalized Regression
+
+## define the model
+pen_reg_model_modstack <- linear_reg(mixture = tune(),
+                                     penalty = tune()) %>%
+  set_engine("glmnet")
+
+
+## define a workflow
+pen_reg_wf_modstack <- workflow() %>%
+  add_recipe(my_recipe_modstack) %>%
+  add_model(pen_reg_model_modstack)
+
+## define grid of tuning values
+pen_reg_tune_grid <- grid_regular(mixture(),
+                                  penalty(),
+                                  levels = 7)
+
+## fit into folds
+pen_reg_fold_fit <- pen_reg_wf_modstack %>%
+  tune_grid(resamples = folds,
+            grid = pen_reg_tune_grid,
+            metrics = metric_set(rmse),
+            control = untunedModel)
+
+
+## Reg Tree
+
+## set up the model for regression trees
+regtree_modstack <- decision_tree(tree_depth = tune(),
+                        cost_complexity = tune(),
+                        min_n=tune()) %>% #Type of model
+  set_engine("rpart") %>% # Engine = What R function to use
+  set_mode("regression")
+
+
+## Workflow
+regTree_wf_modstack <- workflow() %>%
+  add_recipe(my_recipe_modstack) %>%
+  add_model(regtree_modstack)
+
+
+## Grid for tuning
+
+regtree_modstack_tunegrid <- grid_regular(tree_depth(),
+                                          cost_complexity(),
+                                          min_n(),
+                                          levels = 5)
+
+## Tune the Model
+tree_folds_fit_modstack <- regTree_wf_modstack %>%
+  tune_grid(resamples = folds,
+            grid = regtree_modstack_tunegrid,
+            metrics = metric_set(rmse),
+            control = untunedModel)
+
+
+## Stacking time
+
+bike_stack <- stacks() %>%
+  add_candidates(linreg_folds_fit) %>%
+  add_candidates(pen_reg_fold_fit) %>%
+  add_candidates(tree_folds_fit_modstack)
+
+fitted_bike_stack <- bike_stack %>%
+  blend_predictions() %>%
+  fit_members()
+
+
+## Predictions
+modstack_preds <- predict(fitted_bike_stack, new_data = bike_test)
+
+
+
+## Get Predictions for test set AND format for Kaggle for cross validation
+modstack_preds <- modstack_preds %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., bike_test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+## Write predictions to CSV
+vroom_write(x=modstack_preds, file="./modstack_preds.csv", delim=",")
+
+view(modstack_preds)
