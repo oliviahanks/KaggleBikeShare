@@ -1,3 +1,5 @@
+setwd('C:/Users/olivi/OneDrive/Documents/School2023/KaggleBikeShare')
+
 ##
 ## Bike Share EDA Code
 ##
