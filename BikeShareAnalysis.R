@@ -303,53 +303,21 @@ vroom_write(x=test_preds, file="./RFSubmission.csv", delim=",")
 
 ### Model Stacking ###
 
-my_recipe_modstack <- recipe(count ~ ., data = bike_train_modstack) %>% 
-  
-  ## Feature Engineering Section
-  ## make weather a factor
-  step_mutate(weather=factor(weather)) %>%
-  ## change weather 4 into weather 3
-  step_mutate(weather = ifelse(weather == 4, 3, weather))%>%
-  ## create hour and minutes variable
-  step_time(datetime, features = c("hour")) %>%
-  ## get days of the week
-  step_date(datetime, features = "dow") %>%
-  ## make weekend variable for FRI, SAT, SUN
-  step_mutate(weekend = case_when(datetime_dow == "Fri" ~ 1,
-                                  datetime_dow == "Sat" ~ 1,
-                                  datetime_dow == "Sun" ~ 1,
-                                  TRUE ~ 0)) %>%
-  ## remove datetime
-  step_rm(datetime) %>%
-  ## make season a factor
-  step_mutate(season=factor(season)) %>%
-  ## make hours a factor
-  step_mutate(datetime_hour = factor(datetime_hour)) %>%
-  ## remove zero variance predictors
-  step_zv(all_predictors()) %>%
-  ## change character variables to dummy variables
-  step_dummy(all_nominal_predictors()) %>%
-  ## normalize numeric predictors
-  step_normalize(all_numeric_predictors()) %>%
-  
-  prep()
-
-## cross-validation folds
-folds <- vfold_cv(bike_train_modstack, v = 10)
+# use my_recipe_tree
+# use prev folds var
 
 ## control settings for stacking models
-untunedModel <- control_stack_grid()
+untunedModel <- control_stack_grid() # need to be tuned
 tunedModel <- control_stack_resamples()
 
 
 ## Set up linear model
-
 lin_model_modstack <- linear_reg() %>%
   set_engine("lm")
 
 ## Set workflow
 linreg_wf_modstack <- workflow() %>%
-  add_recipe(my_recipe_modstack) %>%
+  add_recipe(my_recipe_tree) %>%
   add_model(lin_model_modstack)
 
 ## fit linear to folds
@@ -359,16 +327,14 @@ linreg_folds_fit <- linreg_wf_modstack %>%
 
 
 ## Penalized Regression
-
 ## define the model
 pen_reg_model_modstack <- linear_reg(mixture = tune(),
                                      penalty = tune()) %>%
   set_engine("glmnet")
 
-
 ## define a workflow
 pen_reg_wf_modstack <- workflow() %>%
-  add_recipe(my_recipe_modstack) %>%
+  add_recipe(my_recipe_tree) %>%
   add_model(pen_reg_model_modstack)
 
 ## define grid of tuning values
@@ -385,7 +351,6 @@ pen_reg_fold_fit <- pen_reg_wf_modstack %>%
 
 
 ## Reg Tree
-
 ## set up the model for regression trees
 regtree_modstack <- decision_tree(tree_depth = tune(),
                         cost_complexity = tune(),
@@ -396,12 +361,10 @@ regtree_modstack <- decision_tree(tree_depth = tune(),
 
 ## Workflow
 regTree_wf_modstack <- workflow() %>%
-  add_recipe(my_recipe_modstack) %>%
+  add_recipe(my_recipe_tree) %>%
   add_model(regtree_modstack)
 
-
 ## Grid for tuning
-
 regtree_modstack_tunegrid <- grid_regular(tree_depth(),
                                           cost_complexity(),
                                           min_n(),
@@ -426,11 +389,8 @@ fitted_bike_stack <- bike_stack %>%
   blend_predictions() %>%
   fit_members()
 
-
 ## Predictions
 modstack_preds <- predict(fitted_bike_stack, new_data = bike_test)
-
-
 
 ## Get Predictions for test set AND format for Kaggle for cross validation
 modstack_preds <- modstack_preds %>% #This predicts log(count)
@@ -440,7 +400,74 @@ modstack_preds <- modstack_preds %>% #This predicts log(count)
   rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
   mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
-## Write predictions to CSV
-vroom_write(x=modstack_preds, file="./modstack_preds.csv", delim=",")
 
-view(modstack_preds)
+## Write predictions to CSV
+vroom_write(x=modstack_preds, file="./stackPredictions.csv", delim=",")
+
+
+### Attemps to get a score < .44
+### Random Forest
+RF_mod <- rand_forest(mtry = tune(),
+min_n=tune(),
+trees=1000) %>% #Type of model (500 or 1000)
+set_engine("ranger") %>% # What R function to use
+set_mode("regression")
+ 
+## Create a workflow with model & recipe
+# recipe
+my_recipe_tree <- recipe(count ~ ., data=bike_train_log) %>% # Set model formula and dataset
+  step_mutate(season=factor(season, levels=1:4, labels=c("spring","summer","fall", "winter"))) %>%
+  step_mutate(weather=factor(weather, levels=1:4, labels=c("clear","misty","raining", "snowing"))) %>%
+  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>%
+  step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("No", "Yes"))) %>%
+  step_time(datetime, features=c("hour")) %>% #create time variable
+  step_mutate(datetime_hour = factor(datetime_hour)) %>%
+  step_date(datetime, features=c("year")) %>% #create year variable
+  step_mutate(datetime_year = factor(datetime_year)) %>%
+  step_rm(datetime)
+ 
+RF_wf <- workflow() %>%
+add_recipe(my_recipe_tree) %>%
+add_model(RF_mod)
+ 
+## Set up grid of tuning values
+RF_tuning_grid <- grid_regular(mtry(range = c(1, 9)),
+                               min_n())
+ 
+## Set up K-fold CV
+folds <- vfold_cv(bike_train_log, v = 5, repeats=1)
+ 
+## Run the CV
+CV_results_RF <- RF_wf %>%
+tune_grid(resamples=folds,
+grid=RF_tuning_grid,
+metrics=metric_set(rmse, mae, rsq)) #Or leave metrics NULL
+ 
+
+## Find best tuning parameters
+bestTune <- CV_results_RF %>%
+select_best("rmse")
+ 
+## Finalize workflow and predict
+final_wf <-
+RF_wf %>%
+finalize_workflow(bestTune) %>%
+fit(data=bike_train_log)
+ 
+## Predict
+final_wf %>%
+predict(new_data = bike_test)
+ 
+test_preds <- final_wf %>%
+  predict(new_data = bike_test) %>%
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., bike_test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+## Write prediction file to CSV
+vroom_write(x=test_preds, file="./FE3Submission.csv", delim=",") # got .40911
+
+
